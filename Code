@@ -1,0 +1,96 @@
+import arcpy
+from arcpy import env
+from arcpy.sa import *
+import numpy as np
+from scipy.signal import find_peaks
+
+
+# SETTING WORKSPACE
+env.workspace = r"D:\GIS\Drainage Network"
+env.overwriteOutput = True
+arcpy.CheckOutExtension("Spatial")
+
+
+# INPUT DEM SRTM 30m
+dem = r"D:\GIS\DEM_SRTM.tif"
+
+print("=== Hydrology Process Started ===")
+
+# 1. FILL SINK
+print("[1] Filling sinks...")
+filled_dem = Fill(dem)
+filled_dem.save("dem_filled.tif")
+
+# 2. FLOW DIRECTION
+print("[2] Generating Flow Direction...")
+fdir = FlowDirection("dem_filled.tif", "NORMAL")
+fdir.save("flowdir.tif")
+
+# 3. FLOW ACCUMULATION
+print("[3] Generating Flow Accumulation...")
+facc = FlowAccumulation("flowdir.tif", data_type="FLOAT")
+facc.save("flowacc.tif")
+
+
+# 4. AUTOMATIC THRESHOLD DETECTION
+
+print("[4] Calculating automatic threshold...")
+
+# Convert raster to numpy array
+arr = arcpy.RasterToNumPyArray("flowacc.tif")
+arr = arr[arr > 0]       # remove zeros
+log_arr = np.log(arr)    # log transform
+
+# Histogram
+hist, bins = np.histogram(log_arr, bins=300)
+
+# Peak detection
+peaks, _ = find_peaks(hist, distance=20)
+
+# Using valley between first two peaks
+threshold_log = bins[peaks[0]]
+threshold_value = float(np.exp(threshold_log))
+
+print(">> Suggested Threshold =", threshold_value)
+
+
+# 5. STREAM RASTER (based on auto threshold)
+print("[5] Extracting stream raster...")
+stream_raster = Con(Raster("flowacc.tif") > threshold_value, 1)
+stream_raster.save("stream_raster.tif")
+
+
+# 6. STREAM LINK
+print("[6] Generating stream link...")
+stream_link = StreamLink("stream_raster.tif", "flowdir.tif")
+stream_link.save("stream_link.tif")
+
+
+# 7. STREAM TO POLYLINE
+print("[7] Converting stream to polyline...")
+arcpy.sa.StreamToFeature(
+    in_stream_raster="stream_link.tif",
+    in_flow_direction_raster="flowdir.tif",
+    out_polyline_features="stream_network.shp",
+    simplify="SIMPLIFY"
+)
+
+print(">> Stream network shapefile created: stream_network.shp")
+
+# 8. ADD RESULT TO MAP FOR VISUALIZATION
+print("[8] Adding layers to ArcGIS Pro map...")
+
+try:
+    aprx = arcpy.mp.ArcGISProject("CURRENT")
+    m = aprx.listMaps()[0]
+
+    m.addDataFromPath(r"D:\GIS\Drainage Network\stream_network.shp")
+    m.addDataFromPath(r"D:\GIS\Drainage Network\stream_raster.tif")
+    m.addDataFromPath(r"D:\GIS\Drainage Network\flowacc.tif")
+
+    aprx.save()
+    print(">> Layers added to map.")
+except:
+    print(">> Skipped map visualization (no CURRENT project).")
+
+print("=== Drainage Network Extraction Completed ===")
